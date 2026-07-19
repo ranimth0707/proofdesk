@@ -60,9 +60,16 @@ export interface FixturePayload {
   [k: string]: unknown;
 }
 
-/** The three outcomes of the full-time 1X2 market. */
+/** The three outcomes of the 1X2 market. */
 export type Outcome = "HOME" | "DRAW" | "AWAY";
 export const OUTCOMES: Outcome[] = ["HOME", "DRAW", "AWAY"];
+
+/**
+ * Market horizon the desk prices. The devnet demo feed publishes first-half
+ * (`MarketPeriod: "half=1"`) 1X2 alongside (or instead of) the full-time
+ * market, so the engine supports both: FT preferred, H1 as fallback.
+ */
+export type Horizon = "FT" | "H1";
 
 /** Probability triple over 1X2, always sums to ~1. */
 export interface ProbTriple {

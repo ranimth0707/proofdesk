@@ -26,6 +26,7 @@ import {
   OUTCOMES,
   type EngineEvent,
   type FixturePayload,
+  type Horizon,
   type OddsPayload,
   type Outcome,
   type ProbTriple,
@@ -38,8 +39,16 @@ const log = makeLog("engine");
 interface FixtureState {
   fixtureId: number;
   model: InplayModel;
+  /** Consensus for the market the desk trades (see marketHorizon). */
   consensus: ProbTriple | null;
-  prematchConsensus: ProbTriple | null;
+  /** Latest pre-match triple per horizon (calibration targets). */
+  prematchByHorizon: Map<Horizon, ProbTriple>;
+  /**
+   * Which 1X2 market this fixture trades. Locked at calibration to the
+   * horizon of the first in-running 1X2 record (the devnet demo feed
+   * publishes the first-half market; mainnet carries full-time).
+   */
+  marketHorizon: Horizon | null;
   standingQuotes: Map<Outcome, Quote>;
   lastDisruptiveEventTs: number;
   name?: string;
@@ -123,26 +132,37 @@ export class Engine {
 
   private onOdds(recvTs: number, odds: OddsPayload): void {
     if (!odds || typeof odds.FixtureId !== "number") return;
-    const triple = extract1x2(odds);
-    if (!triple) return; // not a full-time 1X2 record, or Pct missing
+    const extracted = extract1x2(odds);
+    if (!extracted) return; // not a supported 1X2 record, or Pct missing
+    const { triple, horizon } = extracted;
 
     const st = this.fixtureState(odds.FixtureId);
-    st.consensus = triple;
-    this.emit("odds", { fixtureId: odds.FixtureId, triple, inRunning: odds.InRunning, ts: odds.Ts }, recvTs);
 
     if (!odds.InRunning) {
-      // Latest pre-match consensus becomes the calibration target at kickoff.
-      st.prematchConsensus = triple;
+      // Latest pre-match consensus per horizon = calibration target at kickoff.
+      st.prematchByHorizon.set(horizon, triple);
+      // Pre-match, mirror the best available market for the dashboard.
+      if (st.marketHorizon === null || st.marketHorizon === horizon) st.consensus = triple;
+      this.emit("odds", { fixtureId: odds.FixtureId, triple, horizon, inRunning: false, ts: odds.Ts }, recvTs);
       return;
     }
 
+    // Market lock: the first in-running 1X2 record decides which horizon the
+    // desk trades for this fixture (deterministic; FT and H1 both supported).
+    if (st.marketHorizon === null) st.marketHorizon = horizon;
+    if (horizon !== st.marketHorizon) return; // other markets: observed, not traded
+
+    st.consensus = triple;
+    this.emit("odds", { fixtureId: odds.FixtureId, triple, horizon, inRunning: true, ts: odds.Ts }, recvTs);
+
     if (!st.model.isCalibrated) {
-      const base = st.prematchConsensus ?? triple;
-      st.model.calibrate(base);
+      const prematch = st.prematchByHorizon.get(horizon);
+      st.model.calibrate(prematch ?? triple, horizon);
       this.emit("model", {
         fixtureId: odds.FixtureId,
-        note: st.prematchConsensus ? "calibrated_from_prematch" : "calibrated_from_first_inplay",
-        base,
+        note: prematch ? "calibrated_from_prematch" : "calibrated_from_first_inplay",
+        horizon,
+        base: prematch ?? triple,
       });
     }
 
@@ -237,7 +257,7 @@ export class Engine {
     if (isFinalRecord(ev) && !st.settled) {
       st.settled = true;
       st.standingQuotes.clear();
-      void this.finalize(ev, fixtureId);
+      void this.finalize(ev, fixtureId, st.marketHorizon ?? "FT");
       return;
     }
 
@@ -245,11 +265,12 @@ export class Engine {
     this.quoteCycle(st, recvTs);
   }
 
-  private async finalize(ev: ScorePayload, fixtureId: number): Promise<void> {
-    const settlement = await this.settler.settleFixture(ev);
+  private async finalize(ev: ScorePayload, fixtureId: number, horizon: Horizon): Promise<void> {
+    const settlement = await this.settler.settleFixture(ev, horizon);
     if (!settlement) return;
     if (this.anchorer) {
       const sig = await this.anchorer.anchorSettlement(fixtureId, {
+        horizon,
         homeGoals: settlement.homeGoals,
         awayGoals: settlement.awayGoals,
         winner: settlement.winner,
@@ -282,6 +303,7 @@ export class Engine {
         name: this.fixtureName(st.fixtureId),
         consensus: st.consensus,
         model: model.probs,
+        horizon: st.marketHorizon,
         phase: model.phase,
         score: `${model.homeGoals}-${model.awayGoals}`,
         ready: model.ready,
@@ -311,7 +333,8 @@ export class Engine {
         fixtureId,
         model: new InplayModel(fixtureId),
         consensus: null,
-        prematchConsensus: null,
+        prematchByHorizon: new Map(),
+        marketHorizon: null,
         standingQuotes: new Map(),
         lastDisruptiveEventTs: 0,
         settled: false,
@@ -333,20 +356,22 @@ function safeParse(raw: string): unknown | null {
 }
 
 /**
- * Extract a full-time 1X2 probability triple from an odds record, if this
- * record is one. Detection is by shape, not by hard-coded SuperOddsType:
- * three prices whose names map onto {1,X,2}/{Home,Draw,Away}, with usable
- * Pct values. Records with "NA" percentages or other market shapes are
- * ignored (per TxLINE docs, integrations must branch on the actual payload).
+ * Extract a 1X2 probability triple + market horizon from an odds record, if
+ * this record is a 1X2 result market. Detection is by shape (three prices
+ * whose names map onto home/draw/away with usable Pct values) — per TxLINE
+ * docs, integrations must branch on the actual payload, and the devnet demo
+ * feed confirmed the shape: SuperOddsType `1X2_PARTICIPANT_RESULT`,
+ * PriceNames `["part1","draw","part2"]`, MarketPeriod `"half=1"` for the
+ * first-half market. Records with "NA" percentages or other market shapes
+ * are ignored.
  */
-export function extract1x2(odds: OddsPayload): ProbTriple | null {
+export function extract1x2(odds: OddsPayload): { triple: ProbTriple; horizon: Horizon } | null {
   const names = odds.PriceNames;
   const pct = odds.Pct;
   if (!names || !pct || names.length !== 3 || pct.length !== 3) return null;
-  // Full-time market only: MarketPeriod absent, "FT", "Full Time", "0" all
-  // count as full time; explicit half markers are excluded.
-  const period = String(odds.MarketPeriod ?? "").toLowerCase();
-  if (period && /h1|h2|1st|2nd|half/.test(period)) return null;
+
+  const horizon = horizonOf(odds.MarketPeriod);
+  if (!horizon) return null;
 
   const mapped: Partial<Record<Outcome, number>> = {};
   for (let i = 0; i < 3; i++) {
@@ -359,13 +384,23 @@ export function extract1x2(odds: OddsPayload): ProbTriple | null {
   if (mapped.HOME === undefined || mapped.DRAW === undefined || mapped.AWAY === undefined) return null;
   const sum = mapped.HOME + mapped.DRAW + mapped.AWAY;
   if (sum < 0.9 || sum > 1.1) return null; // not a de-margined 3-way book
-  return { HOME: mapped.HOME / sum, DRAW: mapped.DRAW / sum, AWAY: mapped.AWAY / sum };
+  return {
+    triple: { HOME: mapped.HOME / sum, DRAW: mapped.DRAW / sum, AWAY: mapped.AWAY / sum },
+    horizon,
+  };
+}
+
+function horizonOf(marketPeriod: string | null | undefined): Horizon | null {
+  const p = String(marketPeriod ?? "").trim().toLowerCase();
+  if (!p || p === "half=0" || p === "full" || p === "ft" || p === "match") return "FT";
+  if (p === "half=1" || p === "h1" || p === "1st half") return "H1";
+  return null; // half=2 and anything else: not supported
 }
 
 function normalizeOutcomeName(name: string): Outcome | null {
   const n = name.trim().toLowerCase();
-  if (n === "1" || n === "home" || n === "p1" || n === "participant1") return "HOME";
+  if (n === "1" || n === "home" || n === "p1" || n === "part1" || n === "participant1") return "HOME";
   if (n === "x" || n === "draw" || n === "tie") return "DRAW";
-  if (n === "2" || n === "away" || n === "p2" || n === "participant2") return "AWAY";
+  if (n === "2" || n === "away" || n === "p2" || n === "part2" || n === "participant2") return "AWAY";
   return null;
 }

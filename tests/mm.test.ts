@@ -7,6 +7,7 @@ import { Phase, type Quote } from "../src/types.js";
 
 const model = (h: number, d: number, a: number, phase = Phase.H1): ModelSnapshot => ({
   probs: { HOME: h, DRAW: d, AWAY: a },
+  horizon: "FT",
   lambdaHomeRemaining: 1, lambdaAwayRemaining: 1, elapsedFrac: 0.3,
   homeGoals: 0, awayGoals: 0, redCardsHome: 0, redCardsAway: 0,
   pendingPenalty: null, momentumFactorHome: 1, momentumFactorAway: 1,

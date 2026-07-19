@@ -64,14 +64,25 @@ test("gate: kill switch halts everything", () => {
   assert.equal(d.policy, "kill-switch");
 });
 
-test("extract1x2: parses StablePrice Pct and rejects other shapes", () => {
+test("extract1x2: parses StablePrice Pct and classifies market horizon", () => {
   const good = extract1x2({
     FixtureId: 1, MessageId: "m", Ts: 1, Bookmaker: "StablePrice", BookmakerId: 1,
     SuperOddsType: "ML", InRunning: true,
     PriceNames: ["1", "X", "2"], Prices: [1900, 3400, 4100], Pct: ["45.000", "28.000", "27.000"],
   });
   assert.ok(good);
-  assert.ok(Math.abs(good!.HOME - 0.45) < 1e-9);
+  assert.equal(good!.horizon, "FT");
+  assert.ok(Math.abs(good!.triple.HOME - 0.45) < 1e-9);
+
+  // Real devnet demo-feed shape: part1/draw/part2 names, first-half market.
+  const h1 = extract1x2({
+    FixtureId: 1, MessageId: "m", Ts: 1, Bookmaker: "TXLineStablePriceDemargined", BookmakerId: 10021,
+    SuperOddsType: "1X2_PARTICIPANT_RESULT", InRunning: false, MarketPeriod: "half=1",
+    PriceNames: ["part1", "draw", "part2"], Prices: [3330, 2037, 4792], Pct: ["30.030", "49.092", "20.868"],
+  });
+  assert.ok(h1);
+  assert.equal(h1!.horizon, "H1");
+  assert.ok(Math.abs(h1!.triple.HOME - 0.3003) < 1e-3);
 
   const na = extract1x2({
     FixtureId: 1, MessageId: "m", Ts: 1, Bookmaker: "B", BookmakerId: 1,
@@ -80,12 +91,54 @@ test("extract1x2: parses StablePrice Pct and rejects other shapes", () => {
   } as never);
   assert.equal(na, null);
 
-  const halfMarket = extract1x2({
+  // Second-half market: observed but not traded.
+  const h2 = extract1x2({
     FixtureId: 1, MessageId: "m", Ts: 1, Bookmaker: "B", BookmakerId: 1,
-    SuperOddsType: "ML", InRunning: true, MarketPeriod: "H1",
-    PriceNames: ["1", "X", "2"], Prices: [0, 0, 0], Pct: ["50.000", "30.000", "20.000"],
+    SuperOddsType: "1X2_PARTICIPANT_RESULT", InRunning: true, MarketPeriod: "half=2",
+    PriceNames: ["part1", "draw", "part2"], Prices: [0, 0, 0], Pct: ["50.000", "30.000", "20.000"],
   });
-  assert.equal(halfMarket, null);
+  assert.equal(h2, null);
+});
+
+test("engine trades the H1 market when that is what the feed publishes", async () => {
+  const dir = tmpDir();
+  const ledger = new Ledger(path.join(dir, "h1.db"));
+  const gate = new RiskGate(writePolicy(dir));
+  const settler = new Settler(null, ledger, null);
+  const engine = new Engine(ledger, gate, settler, null, null, false);
+  settler.attachBook(engine.book);
+
+  let t = Date.parse("2026-07-19T19:00:00Z");
+  const odds = (h: number, d: number, a: number, inRunning: boolean) =>
+    engine.ingest("odds", t, JSON.stringify({
+      FixtureId: 9, MessageId: `m${t}`, Ts: t, Bookmaker: "TXLineStablePriceDemargined", BookmakerId: 10021,
+      SuperOddsType: "1X2_PARTICIPANT_RESULT", InRunning: inRunning, MarketPeriod: "half=1",
+      PriceNames: ["part1", "draw", "part2"], Prices: [0, 0, 0],
+      Pct: [h.toFixed(3), d.toFixed(3), a.toFixed(3)],
+    }));
+
+  odds(30, 49, 21, false);                      // pre-match H1 triple (draw-heavy — typical for H1)
+  engine.ingest("scores", t, JSON.stringify({ FixtureId: 9, Ts: t, Period: 2, Seq: 1 }));
+  odds(30, 49, 21, true);                       // locks the H1 market + calibrates
+  t += 10 * 60_000;
+  odds(38, 44, 18, true);                       // move → possible fill
+  t += 40 * 60_000;                             // halftime: H1 market decided 1-0
+  engine.ingest("scores", t, JSON.stringify({ FixtureId: 9, Ts: t, Action: "goal", Participant: 1, Period: 2, Seq: 2, Stats: { "1": 1, "2": 0 } }));
+  engine.ingest("scores", t, JSON.stringify({ FixtureId: 9, Ts: t, Period: 3, Seq: 3 }));
+  t += 60 * 60_000;
+  engine.ingest("scores", t, JSON.stringify({
+    FixtureId: 9, Ts: t, Action: "game_finalised", StatusId: 100, Period: 100, Seq: 9,
+    Stats: { "1": 2, "2": 2, "1001": 1, "1002": 0 },   // FT 2-2 but H1 was 1-0
+  }));
+
+  await new Promise((r) => setTimeout(r, 150));
+  const quotes = ledger.recentQuotes(100);
+  assert.ok(quotes.length > 0, "H1 market produced quotes");
+  const s = ledger.settlements()[0] as { winner: string; homeGoals: number; awayGoals: number };
+  assert.equal(s.winner, "HOME", "H1 market settles on the 1001/1002 keys (1-0), not the FT 2-2");
+  assert.equal(s.homeGoals, 1);
+  assert.equal(s.awayGoals, 0);
+  ledger.close();
 });
 
 test("engine: end-to-end synthetic match produces quotes, fill, settlement; deterministic", async () => {

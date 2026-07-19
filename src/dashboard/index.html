@@ -214,7 +214,7 @@ function renderTables() {
     div.onclick = () => { S.selectedFixture = f.fixtureId; renderTables(); scheduleDraw(); };
     const phase = ["","NS","H1","HT","H2","FT","WET","ET1","HTET","ET2","FET","WPE","PE","FPE","INT","ABD","CAN","TXCC","TXCS","PP"][f.phase] || f.phase;
     div.innerHTML = `
-      <div class="name">${f.name} <span style="color:var(--text-muted)">· ${f.score} · ${phase}${f.settled ? " · settled" : ""}</span></div>
+      <div class="name">${f.name} <span style="color:var(--text-muted)">· ${f.score} · ${phase}${f.horizon ? " · market: " + (f.horizon === "H1" ? "1st-half 1X2" : "full-time 1X2") : ""}${f.settled ? " · settled" : ""}</span></div>
       <div class="probs">
         <span>model H ${fmtP(f.model?.HOME)} D ${fmtP(f.model?.DRAW)} A ${fmtP(f.model?.AWAY)}</span>
       </div>

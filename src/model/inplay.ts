@@ -16,7 +16,7 @@
  * which the result market settles; extra time and shootouts do not change it.
  */
 
-import { Phase, type ProbTriple, type ScorePayload } from "../types.js";
+import { Phase, type Horizon, type ProbTriple, type ScorePayload } from "../types.js";
 import { mixPendingGoal, outcomeProbs, solveLambdas } from "./poisson.js";
 
 // ---------------------------------------------------------------------------
@@ -59,6 +59,7 @@ export const PRESSURE_WEIGHTS: Record<string, number> = {
 
 export interface ModelSnapshot {
   probs: ProbTriple;
+  horizon: Horizon;
   lambdaHomeRemaining: number;
   lambdaAwayRemaining: number;
   elapsedFrac: number;
@@ -86,6 +87,8 @@ export class InplayModel {
   private lambdaHome0 = 0;
   private lambdaAway0 = 0;
   private calibrated = false;
+  /** Market horizon the calibration triple refers to (FT or first half). */
+  private horizon: Horizon = "FT";
 
   private phase: Phase = Phase.NS;
   private phaseStartTs = 0;
@@ -94,6 +97,10 @@ export class InplayModel {
 
   private homeGoals = 0;
   private awayGoals = 0;
+  /** First-half goals, frozen when the match leaves H1 (for the H1 market). */
+  private h1HomeGoals = 0;
+  private h1AwayGoals = 0;
+  private h1Frozen = false;
   private redHome = 0;
   private redAway = 0;
   private pendingPenalty: "HOME" | "AWAY" | null = null;
@@ -109,13 +116,23 @@ export class InplayModel {
    * Calibrate base intensities from the last pre-kickoff StablePrice triple.
    * Called once; later consensus updates are used for quoting, never to
    * re-fit the model (the model must stay an independent opinion).
+   *
+   * The solved intensities are *horizon-total*: calibrating on the FT triple
+   * yields whole-match lambdas, calibrating on the first-half triple yields
+   * first-half lambdas. All in-play decay is then computed relative to that
+   * same horizon, so no cross-horizon scaling constant is needed.
    */
-  calibrate(prematch: ProbTriple): void {
+  calibrate(prematch: ProbTriple, horizon: Horizon = "FT"): void {
     if (this.calibrated) return;
     const { lambdaHome, lambdaAway } = solveLambdas(prematch);
     this.lambdaHome0 = lambdaHome;
     this.lambdaAway0 = lambdaAway;
+    this.horizon = horizon;
     this.calibrated = true;
+  }
+
+  get marketHorizon(): Horizon {
+    return this.horizon;
   }
 
   get isCalibrated(): boolean {
@@ -133,6 +150,12 @@ export class InplayModel {
     const phase = phaseOf(ev);
     if (phase !== null && phase !== this.phase) {
       this.elapsedAtPhaseStart = this.elapsedPlayingSeconds(ts);
+      // Leaving the first half freezes the H1 score for the H1 market.
+      if (this.phase <= Phase.H1 && phase >= Phase.HT && !this.h1Frozen) {
+        this.h1HomeGoals = this.homeGoals;
+        this.h1AwayGoals = this.awayGoals;
+        this.h1Frozen = true;
+      }
       this.phase = phase;
       this.phaseStartTs = ts;
     }
@@ -145,6 +168,9 @@ export class InplayModel {
       if (typeof stats["2"] === "number") this.awayGoals = stats["2"];
       if (typeof stats["5"] === "number") this.redHome = stats["5"];
       if (typeof stats["6"] === "number") this.redAway = stats["6"];
+      // Period-prefixed H1 goal keys (1000 + base) are authoritative when sent.
+      if (typeof stats["1001"] === "number") { this.h1HomeGoals = stats["1001"]; this.h1Frozen = this.h1Frozen || this.phase >= Phase.HT; }
+      if (typeof stats["1002"] === "number") { this.h1AwayGoals = stats["1002"]; this.h1Frozen = this.h1Frozen || this.phase >= Phase.HT; }
     }
     if (action === "goal") {
       // Stats on the record are authoritative; increment only as a fallback
@@ -207,7 +233,10 @@ export class InplayModel {
   /** Current model output. Deterministic in (state, ts). */
   snapshot(ts: number): ModelSnapshot {
     const elapsed = this.elapsedPlayingSeconds(ts);
-    const frac = Math.min(1, elapsed / (2 * HALF_SECONDS));
+    // Elapsed fraction is relative to the market horizon: the whole match for
+    // FT, the first half only for the H1 market (whose lambdas are H1-total).
+    const horizonSeconds = this.horizon === "H1" ? HALF_SECONDS : 2 * HALF_SECONDS;
+    const frac = Math.min(1, elapsed / horizonSeconds);
     const remaining = 1 - frac;
 
     // Red-card multipliers (compound if multiple reds).
@@ -226,29 +255,38 @@ export class InplayModel {
     const lh = this.lambdaHome0 * remaining * redSelfHome * redOppHome * momHome;
     const la = this.lambdaAway0 * remaining * redSelfAway * redOppAway * momAway;
 
+    // The H1 market's horizon ends at halftime; FT's at full time.
+    const horizonExhausted =
+      this.horizon === "H1"
+        ? this.phase >= Phase.HT && this.phase !== Phase.TXCS
+        : this.phase >= Phase.F && this.phase !== Phase.TXCS;
+    const scoreHome = this.horizon === "H1" && this.h1Frozen ? this.h1HomeGoals : this.homeGoals;
+    const scoreAway = this.horizon === "H1" && this.h1Frozen ? this.h1AwayGoals : this.awayGoals;
+
     let probs: ProbTriple;
     if (!this.calibrated) {
       probs = { HOME: 1 / 3, DRAW: 1 / 3, AWAY: 1 / 3 };
-    } else if (this.phase >= Phase.F && this.phase !== Phase.TXCS) {
-      // Market horizon passed: collapse to the observed full-time result.
+    } else if (horizonExhausted) {
+      // Market horizon passed: collapse to the observed result.
       probs = {
-        HOME: this.homeGoals > this.awayGoals ? 1 : 0,
-        DRAW: this.homeGoals === this.awayGoals ? 1 : 0,
-        AWAY: this.homeGoals < this.awayGoals ? 1 : 0,
+        HOME: scoreHome > scoreAway ? 1 : 0,
+        DRAW: scoreHome === scoreAway ? 1 : 0,
+        AWAY: scoreHome < scoreAway ? 1 : 0,
       };
     } else {
-      probs = outcomeProbs(lh, la, this.homeGoals, this.awayGoals);
+      probs = outcomeProbs(lh, la, scoreHome, scoreAway);
       if (this.pendingPenalty) {
         const withGoal =
           this.pendingPenalty === "HOME"
-            ? outcomeProbs(lh, la, this.homeGoals + 1, this.awayGoals)
-            : outcomeProbs(lh, la, this.homeGoals, this.awayGoals + 1);
+            ? outcomeProbs(lh, la, scoreHome + 1, scoreAway)
+            : outcomeProbs(lh, la, scoreHome, scoreAway + 1);
         probs = mixPendingGoal(withGoal, probs, PENALTY_CONVERSION);
       }
     }
 
     return {
       probs,
+      horizon: this.horizon,
       lambdaHomeRemaining: lh,
       lambdaAwayRemaining: la,
       elapsedFrac: frac,
@@ -286,9 +324,21 @@ function participantSide(ev: ScorePayload): "HOME" | "AWAY" | null {
   return null;
 }
 
+const PHASE_NAMES: Record<string, Phase> = {
+  ns: Phase.NS, scheduled: Phase.NS, h1: Phase.H1, ht: Phase.HT, h2: Phase.H2,
+  f: Phase.F, ft: Phase.F, finished: Phase.F, wet: Phase.WET, et1: Phase.ET1,
+  htet: Phase.HTET, et2: Phase.ET2, fet: Phase.FET, wpe: Phase.WPE, pe: Phase.PE,
+  fpe: Phase.FPE, i: Phase.I, interrupted: Phase.I, a: Phase.A, abandoned: Phase.A,
+  c: Phase.C, cancelled: Phase.C, txcc: Phase.TXCC, txcs: Phase.TXCS, p: Phase.P,
+  postponed: Phase.P,
+};
+
 function phaseOf(ev: ScorePayload): Phase | null {
   const raw =
     ev.Period ?? ev.period ?? ev.GameState ?? ev.gameState ?? (ev as Record<string, unknown>)["Phase"];
+  if (typeof raw === "string" && PHASE_NAMES[raw.trim().toLowerCase()] !== undefined) {
+    return PHASE_NAMES[raw.trim().toLowerCase()];
+  }
   const n = typeof raw === "string" ? Number.parseInt(raw, 10) : typeof raw === "number" ? raw : NaN;
   if (!Number.isFinite(n)) return null;
   if (n >= 1 && n <= 19) return n as Phase;

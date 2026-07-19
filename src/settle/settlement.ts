@@ -23,7 +23,7 @@ import BN from "bn.js";
 import type { Book } from "../mm/book.js";
 import type { Ledger } from "../ledger/db.js";
 import { makeLog } from "../log.js";
-import type { Outcome, ScorePayload, Settlement } from "../types.js";
+import type { Horizon, Outcome, ScorePayload, Settlement } from "../types.js";
 import type { TxlineRest } from "../txline/rest.js";
 
 const log = makeLog("settle");
@@ -40,11 +40,20 @@ export function isFinalRecord(ev: ScorePayload): boolean {
   return action === "game_finalised" || (status === 100 && period === 100);
 }
 
-export function finalGoals(ev: ScorePayload): { home: number; away: number } | null {
+/**
+ * Stat keys per TxLINE soccer encoding: base 1/2 = P1/P2 total goals,
+ * period prefix 1000 = first half. The H1 market settles on 1001/1002.
+ */
+export function statKeysFor(horizon: Horizon): [number, number] {
+  return horizon === "H1" ? [1001, 1002] : [1, 2];
+}
+
+export function finalGoals(ev: ScorePayload, horizon: Horizon = "FT"): { home: number; away: number } | null {
   const stats = (ev.Stats ?? ev.stats) as Record<string, number> | undefined;
   if (!stats) return null;
-  const home = stats["1"];
-  const away = stats["2"];
+  const [homeKey, awayKey] = statKeysFor(horizon);
+  const home = stats[String(homeKey)];
+  const away = stats[String(awayKey)];
   if (typeof home !== "number" || typeof away !== "number") return null;
   return { home, away };
 }
@@ -74,14 +83,14 @@ export class Settler {
    * Settle a fixture from its observed final record.
    * Returns the settlement row (already persisted).
    */
-  async settleFixture(ev: ScorePayload): Promise<Settlement | null> {
+  async settleFixture(ev: ScorePayload, horizon: Horizon = "FT"): Promise<Settlement | null> {
     const fixtureId = Number(ev.FixtureId ?? ev.fixtureId);
     const seq = Number(ev.Seq ?? ev.seq ?? 0);
     if (!Number.isFinite(fixtureId)) return null;
 
-    const goals = finalGoals(ev);
+    const goals = finalGoals(ev, horizon);
     if (!goals) {
-      log.warn(`fixture ${fixtureId}: final record without goal stats — cannot settle`);
+      log.warn(`fixture ${fixtureId}: final record without ${horizon} goal stats — cannot settle`);
       return null;
     }
 
@@ -101,14 +110,14 @@ export class Settler {
     };
     this.ledger.saveSettlement(settlement);
     log.info(
-      `fixture ${fixtureId} settled ${goals.home}-${goals.away} (${winner}), pnl=${pnl.toFixed(4)}; proving…`
+      `fixture ${fixtureId} settled ${horizon} ${goals.home}-${goals.away} (${winner}), pnl=${pnl.toFixed(4)}; proving…`
     );
 
     try {
-      const proven = await this.proveFinalScore(fixtureId, seq, goals.home, goals.away);
+      const proven = await this.proveFinalScore(fixtureId, seq, goals.home, goals.away, horizon);
       settlement.proofStatus = proven ? "proven" : "failed";
       settlement.proofDetail = proven
-        ? `validateStatV2 view() returned true for exact score ${goals.home}-${goals.away} at seq ${seq}`
+        ? `validateStatV2 view() returned true for exact ${horizon} score ${goals.home}-${goals.away} at seq ${seq}`
         : "validateStatV2 view() returned false";
     } catch (e) {
       settlement.proofStatus = "unavailable";
@@ -124,12 +133,18 @@ export class Settler {
    * on-chain daily scores Merkle root. Mirrors TxODDS' own devnet example
    * (subscription_scores_v2.ts) — statKeys order [1,2] maps to indexes 0,1.
    */
-  async proveFinalScore(fixtureId: number, seq: number, home: number, away: number): Promise<boolean> {
+  async proveFinalScore(
+    fixtureId: number,
+    seq: number,
+    home: number,
+    away: number,
+    horizon: Horizon = "FT"
+  ): Promise<boolean> {
     if (!this.program) throw new Error("oracle program not configured (no wallet)");
     if (!this.rest) throw new Error("no TxLINE credentials (offline replay)");
     if (!seq) throw new Error("no observed seq on final record");
 
-    const val = (await this.rest.statValidation(fixtureId, seq, [1, 2])) as {
+    const val = (await this.rest.statValidation(fixtureId, seq, [...statKeysFor(horizon)])) as {
       summary: {
         fixtureId: number;
         updateStats: { updateCount: number; minTimestamp: number; maxTimestamp: number };
@@ -172,7 +187,7 @@ export class Settler {
       })),
     };
 
-    // Assert the exact final score: statKeys [1,2] → index 0 = home, 1 = away.
+    // Assert the exact final score: requested statKeys → index 0 = home, 1 = away.
     const exactScoreStrategy = {
       geometricTargets: [],
       distancePredicate: null,

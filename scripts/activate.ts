@@ -97,8 +97,13 @@ async function main(): Promise<void> {
     );
   }
 
+  // Reuse a prior subscribe tx (e.g. when activation failed after subscribing).
+  let txSig = process.env.TX_SIG ?? "";
+  if (txSig) {
+    log.info("reusing existing subscribe tx:", txSig);
+  } else {
   log.info(`sending subscribe(${SERVICE_LEVEL}, ${DURATION_WEEKS})…`);
-  const txSig = await (program.methods as any)
+  txSig = await (program.methods as any)
     .subscribe(SERVICE_LEVEL, DURATION_WEEKS)
     .accounts({
       user: keypair.publicKey,
@@ -113,6 +118,7 @@ async function main(): Promise<void> {
     })
     .rpc();
   log.info("subscribe confirmed:", txSig);
+  }
 
   // 4. activation signature over `${txSig}::${jwt}` (empty league list)
   const message = new TextEncoder().encode(`${txSig}:${SELECTED_LEAGUES.join(",")}:${jwt}`);
@@ -124,13 +130,18 @@ async function main(): Promise<void> {
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${jwt}` },
     body: JSON.stringify({ txSig, walletSignature, leagues: SELECTED_LEAGUES }),
   });
+  const actText = await actRes.text();
   if (!actRes.ok) {
-    throw new Error(`activation failed: HTTP ${actRes.status} ${(await actRes.text()).slice(0, 300)}`);
+    throw new Error(`activation failed: HTTP ${actRes.status} ${actText.slice(0, 300)}`);
   }
-  const actBody = (await actRes.json().catch(() => null)) as { token?: string } | string | null;
-  const apiToken =
-    typeof actBody === "string" ? actBody : actBody?.token ?? (await actRes.text());
-  if (!apiToken) throw new Error("activation returned no token");
+  let apiToken: string;
+  try {
+    const parsed = JSON.parse(actText) as { token?: string } | string;
+    apiToken = typeof parsed === "string" ? parsed : parsed.token ?? "";
+  } catch {
+    apiToken = actText.trim();
+  }
+  if (!apiToken) throw new Error(`activation returned no token (body: ${actText.slice(0, 200)})`);
 
   saveCredentials({
     network: net.network,
