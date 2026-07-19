@@ -1,0 +1,32 @@
+{
+  "name": "proofdesk",
+  "version": "0.1.0",
+  "description": "Autonomous in-play market maker on TxLINE World Cup feeds — every quote and every settlement cryptographically verifiable on Solana",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "start": "tsx src/main.ts live",
+    "replay": "tsx src/main.ts replay",
+    "activate": "tsx scripts/activate.ts",
+    "judge-status": "tsx scripts/judge-status.ts",
+    "judge-trace": "tsx scripts/judge-trace.ts",
+    "verify-anchors": "tsx scripts/verify-anchors.ts",
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@coral-xyz/anchor": "0.32.1",
+    "@solana/spl-token": "^0.4.12",
+    "@solana/web3.js": "^1.98.0",
+    "eventsource": "^4.0.0",
+    "tweetnacl": "^1.0.3"
+  },
+  "devDependencies": {
+    "@types/bn.js": "^5.2.0",
+    "@types/node": "^22.13.4",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.3"
+  }
+}

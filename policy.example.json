@@ -1,0 +1,9 @@
+{
+  "//": "ProofDesk risk policy — copy to data/policy.json and edit. The engine refuses to start without it (fail-closed).",
+  "maxAbsPositionPerOutcome": 10,
+  "maxGrossExposurePerFixture": 6,
+  "maxDailyFills": 400,
+  "fillCooldownSec": 10,
+  "unitSize": 1,
+  "killSwitchFile": "KILL"
+}

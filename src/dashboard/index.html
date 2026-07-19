@@ -1,0 +1,365 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ProofDesk — verifiable in-play market maker</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --surface-0: #111110;
+    --surface-1: #1a1a19;
+    --surface-2: #242422;
+    --border: #383835;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #8a897f;
+    --series-model: #3987e5;   /* blue  — model  */
+    --series-consensus: #199e70; /* aqua — consensus */
+    --series-bid: #9085e9;
+    --series-ask: #d55181;
+    --status-good: #0ca30c;
+    --status-warning: #fab219;
+    --status-serious: #ec835a;
+    --status-critical: #d03b3b;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--surface-0); color: var(--text-primary); font-size: 13px; }
+  header {
+    display: flex; align-items: baseline; gap: 16px; padding: 14px 20px;
+    border-bottom: 1px solid var(--border); background: var(--surface-1);
+  }
+  header h1 { font-size: 16px; margin: 0; letter-spacing: 1px; }
+  header h1 span { color: var(--series-model); }
+  .tagline { color: var(--text-muted); font-size: 11px; }
+  #conn { margin-left: auto; font-size: 11px; color: var(--text-secondary); }
+  #killswitch { color: var(--status-critical); font-weight: bold; display: none; }
+  main {
+    display: grid; gap: 12px; padding: 12px 20px;
+    grid-template-columns: 1.4fr 1fr 1fr;
+    grid-template-areas:
+      "board board board"
+      "chart chart quotes"
+      "positions fills anchors"
+      "settlements settlements gates";
+  }
+  section {
+    background: var(--surface-1); border: 1px solid var(--border);
+    border-radius: 6px; padding: 12px; min-height: 60px; overflow: auto;
+  }
+  section h2 {
+    margin: 0 0 8px; font-size: 11px; font-weight: 600; letter-spacing: 1.5px;
+    text-transform: uppercase; color: var(--text-muted);
+  }
+  #board { grid-area: board; display: flex; gap: 10px; flex-wrap: wrap; background: none; border: none; padding: 0; }
+  .fixture-card {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px 14px; cursor: pointer; min-width: 260px; flex: 1;
+  }
+  .fixture-card.selected { border-color: var(--series-model); }
+  .fixture-card .name { font-size: 13px; color: var(--text-primary); margin-bottom: 4px; }
+  .fixture-card .meta { color: var(--text-muted); font-size: 11px; }
+  .fixture-card .probs { display: flex; gap: 10px; margin-top: 6px; font-size: 12px; color: var(--text-secondary); }
+  #chartwrap { grid-area: chart; }
+  #quotes { grid-area: quotes; }
+  #positions { grid-area: positions; }
+  #fills { grid-area: fills; }
+  #anchors { grid-area: anchors; }
+  #settlements { grid-area: settlements; }
+  #gates { grid-area: gates; }
+  canvas { width: 100%; height: 260px; display: block; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: right; padding: 3px 6px; border-bottom: 1px solid var(--surface-2); color: var(--text-secondary); }
+  th { color: var(--text-muted); font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; }
+  td:first-child, th:first-child { text-align: left; }
+  .pos-qty-long { color: var(--series-model); }
+  .pos-qty-short { color: var(--series-ask); }
+  .pnl-pos { color: var(--status-good); }
+  .pnl-neg { color: var(--status-critical); }
+  .badge { padding: 1px 6px; border-radius: 3px; font-size: 10px; border: 1px solid; }
+  .badge.proven { color: var(--status-good); border-color: var(--status-good); }
+  .badge.proven::before { content: "✔ "; }
+  .badge.pending { color: var(--status-warning); border-color: var(--status-warning); }
+  .badge.pending::before { content: "… "; }
+  .badge.failed, .badge.unavailable { color: var(--status-serious); border-color: var(--status-serious); }
+  .badge.failed::before, .badge.unavailable::before { content: "! "; }
+  a { color: var(--series-model); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .legend { display: flex; gap: 16px; font-size: 11px; color: var(--text-secondary); margin: 4px 0 8px; }
+  .legend .chip { display: inline-block; width: 14px; height: 3px; margin-right: 5px; vertical-align: middle; border-radius: 2px; }
+  #outsel { margin-left: 10px; background: var(--surface-2); color: var(--text-primary); border: 1px solid var(--border); border-radius: 4px; font: inherit; padding: 2px 6px; }
+  .empty { color: var(--text-muted); font-size: 11px; padding: 8px 0; }
+  #tooltip {
+    position: fixed; pointer-events: none; background: var(--surface-2); border: 1px solid var(--border);
+    border-radius: 4px; padding: 6px 8px; font-size: 11px; display: none; z-index: 10; color: var(--text-secondary);
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>PROOF<span>DESK</span></h1>
+  <div class="tagline">autonomous in-play market maker · every quote &amp; settlement verifiable on Solana · data: TxLINE</div>
+  <div id="killswitch">⛔ KILL SWITCH ACTIVE</div>
+  <div id="conn">connecting…</div>
+</header>
+<main>
+  <div id="board"></div>
+
+  <section id="chartwrap">
+    <h2>Model vs consensus — win probability
+      <select id="outsel">
+        <option value="HOME">home</option>
+        <option value="DRAW">draw</option>
+        <option value="AWAY">away</option>
+      </select>
+    </h2>
+    <div class="legend">
+      <span><span class="chip" style="background:var(--series-model)"></span>ProofDesk model</span>
+      <span><span class="chip" style="background:var(--series-consensus)"></span>StablePrice consensus</span>
+      <span><span class="chip" style="background:var(--series-bid);height:1px"></span>bid/ask band</span>
+    </div>
+    <canvas id="chart" height="260"></canvas>
+  </section>
+
+  <section id="quotes"><h2>Standing quotes</h2><div id="quotes-body" class="empty">no quotes yet</div></section>
+  <section id="positions"><h2>Positions &amp; PnL</h2><div id="positions-body" class="empty">flat</div></section>
+  <section id="fills"><h2>Fills (adverse-flow sim)</h2><div id="fills-body" class="empty">none yet</div></section>
+  <section id="anchors"><h2>On-chain anchors</h2><div id="anchors-body" class="empty">none yet</div></section>
+  <section id="settlements"><h2>Settlements — proof-graded</h2><div id="settlements-body" class="empty">no finished fixtures yet</div></section>
+  <section id="gates"><h2>Risk gate refusals</h2><div id="gates-body" class="empty">none</div></section>
+</main>
+<div id="tooltip"></div>
+
+<script>
+const S = {
+  state: null,
+  selectedFixture: null,
+  outcome: "HOME",
+  // per fixture+outcome time series: [{t, model, consensus, bid, ask}]
+  series: {},
+};
+const fmtP = (x) => x == null ? "–" : (100 * x).toFixed(1) + "%";
+const fmtT = (t) => new Date(t).toLocaleTimeString();
+const el = (id) => document.getElementById(id);
+
+function seriesKey(f, o) { return f + ":" + o; }
+function pushPoint(fixtureId, outcome, point) {
+  const k = seriesKey(fixtureId, outcome);
+  (S.series[k] = S.series[k] || []).push(point);
+  if (S.series[k].length > 3000) S.series[k].splice(0, 500);
+}
+
+// ---- SSE live updates ----
+const es = new EventSource("/events");
+es.onopen = () => { el("conn").textContent = "● live"; el("conn").style.color = "var(--status-good)"; };
+es.onerror = () => { el("conn").textContent = "○ reconnecting"; el("conn").style.color = "var(--status-warning)"; };
+es.onmessage = (m) => {
+  try { handle(JSON.parse(m.data)); } catch {}
+};
+
+function handle(ev) {
+  const p = ev.payload || {};
+  if (ev.type === "quote" && p.fixtureId) {
+    pushPoint(p.fixtureId, p.outcome, { t: ev.ts, model: p.modelProb, consensus: p.consensusProb, bid: p.suspended ? null : p.bid, ask: p.suspended ? null : p.ask });
+    if (!S.selectedFixture) S.selectedFixture = p.fixtureId;
+  }
+  if (ev.type === "odds" && p.fixtureId && p.triple) {
+    for (const o of ["HOME","DRAW","AWAY"]) {
+      const k = seriesKey(p.fixtureId, o);
+      const last = (S.series[k] || []).slice(-1)[0];
+      pushPoint(p.fixtureId, o, { t: ev.ts, model: last ? last.model : null, consensus: p.triple[o], bid: last ? last.bid : null, ask: last ? last.ask : null });
+    }
+    if (!S.selectedFixture) S.selectedFixture = p.fixtureId;
+  }
+  scheduleDraw();
+}
+
+// ---- chart backfill from the ledger on page load ----
+(async () => {
+  try {
+    const res = await fetch("/api/history");
+    const quotes = await res.json();
+    for (const q of quotes) {
+      pushPoint(q.fixtureId, q.outcome, {
+        t: q.ts, model: q.modelProb, consensus: q.consensusProb,
+        bid: q.suspended ? null : q.bid, ask: q.suspended ? null : q.ask,
+      });
+      if (!S.selectedFixture) S.selectedFixture = q.fixtureId;
+    }
+    scheduleDraw();
+  } catch {}
+})();
+
+// ---- state polling (reconciliation + tables) ----
+async function poll() {
+  try {
+    const res = await fetch("/api/state");
+    S.state = await res.json();
+    renderTables();
+  } catch {}
+}
+setInterval(poll, 4000); poll();
+
+function renderTables() {
+  const st = S.state; if (!st) return;
+  el("killswitch").style.display = st.killSwitch ? "block" : "none";
+
+  // fixtures board
+  const board = el("board");
+  board.innerHTML = "";
+  for (const f of st.fixtures) {
+    const div = document.createElement("div");
+    div.className = "fixture-card" + (f.fixtureId === S.selectedFixture ? " selected" : "");
+    div.onclick = () => { S.selectedFixture = f.fixtureId; renderTables(); scheduleDraw(); };
+    const phase = ["","NS","H1","HT","H2","FT","WET","ET1","HTET","ET2","FET","WPE","PE","FPE","INT","ABD","CAN","TXCC","TXCS","PP"][f.phase] || f.phase;
+    div.innerHTML = `
+      <div class="name">${f.name} <span style="color:var(--text-muted)">· ${f.score} · ${phase}${f.settled ? " · settled" : ""}</span></div>
+      <div class="probs">
+        <span>model H ${fmtP(f.model?.HOME)} D ${fmtP(f.model?.DRAW)} A ${fmtP(f.model?.AWAY)}</span>
+      </div>
+      <div class="probs">
+        <span style="color:var(--series-consensus)">cons.&nbsp; H ${fmtP(f.consensus?.HOME)} D ${fmtP(f.consensus?.DRAW)} A ${fmtP(f.consensus?.AWAY)}</span>
+      </div>
+      <div class="meta">unrealized ${f.unrealized >= 0 ? "+" : ""}${(f.unrealized||0).toFixed(3)}</div>`;
+    board.appendChild(div);
+  }
+  if (st.fixtures.length === 0) board.innerHTML = '<section style="flex:1"><div class="empty">waiting for feed frames…</div></section>';
+
+  // standing quotes of selected fixture
+  const sel = st.fixtures.find((f) => f.fixtureId === S.selectedFixture) || st.fixtures[0];
+  if (sel) {
+    const rows = sel.quotes.map((q) => `
+      <tr><td>${q.outcome}</td>
+        <td style="color:var(--series-bid)">${q.suspended ? "—" : fmtP(q.bid)}</td>
+        <td style="color:var(--series-ask)">${q.suspended ? "—" : fmtP(q.ask)}</td>
+        <td>${fmtP(q.spread)}</td>
+        <td>${q.suspended ? '<span class="badge unavailable">susp</span>' : '<span class="badge proven">live</span>'}</td></tr>`).join("");
+    el("quotes-body").innerHTML = sel.quotes.length
+      ? `<table><tr><th>outcome</th><th>bid</th><th>ask</th><th>spread</th><th>state</th></tr>${rows}</table>`
+      : '<div class="empty">no quotes yet</div>';
+  }
+
+  // positions
+  const pos = st.positions || [];
+  el("positions-body").innerHTML = pos.length
+    ? `<table><tr><th>fixture</th><th>outcome</th><th>qty</th><th>avg</th><th>realized</th></tr>` +
+      pos.map((p) => `<tr><td>${p.fixtureId}</td><td>${p.outcome}</td>
+        <td class="${p.qty >= 0 ? "pos-qty-long" : "pos-qty-short"}">${p.qty > 0 ? "+" : ""}${p.qty}</td>
+        <td>${fmtP(p.avgPrice)}</td>
+        <td class="${p.realizedPnl >= 0 ? "pnl-pos" : "pnl-neg"}">${p.realizedPnl.toFixed(3)}</td></tr>`).join("") + "</table>"
+    : '<div class="empty">flat</div>';
+
+  // fills
+  const fills = st.recentFills || [];
+  el("fills-body").innerHTML = fills.length
+    ? `<table><tr><th>time</th><th>fixture</th><th>o</th><th>side</th><th>px</th></tr>` +
+      fills.map((f) => `<tr><td>${fmtT(f.ts)}</td><td>${f.fixtureId}</td><td>${f.outcome[0]}</td>
+        <td>${f.side === 1 ? "BUY" : "SELL"}</td><td>${fmtP(f.price)}</td></tr>`).join("") + "</table>"
+    : '<div class="empty">none yet</div>';
+
+  // anchors
+  const anchors = (st.anchors || []).slice(-12).reverse();
+  el("anchors-body").innerHTML = anchors.length
+    ? `<table><tr><th>#</th><th>kind</th><th>hash</th><th>tx</th></tr>` +
+      anchors.map((a) => `<tr><td>${a.seq}</td><td>${a.kind}</td>
+        <td title="${a.payloadHash}">${a.payloadHash.slice(0, 10)}…</td>
+        <td>${a.txSig ? `<a target="_blank" href="https://explorer.solana.com/tx/${a.txSig}?cluster=devnet">${a.txSig.slice(0, 8)}…</a>` : a.status}</td></tr>`).join("") + "</table>"
+    : '<div class="empty">none yet</div>';
+
+  // settlements
+  const setts = st.settlements || [];
+  el("settlements-body").innerHTML = setts.length
+    ? `<table><tr><th>fixture</th><th>final</th><th>winner</th><th>pnl</th><th>merkle proof</th><th>anchor</th></tr>` +
+      setts.map((s) => `<tr><td>${s.fixtureId}</td><td>${s.homeGoals}-${s.awayGoals}</td><td>${s.winner}</td>
+        <td class="${s.pnl >= 0 ? "pnl-pos" : "pnl-neg"}">${(s.pnl ?? 0).toFixed(3)}</td>
+        <td><span class="badge ${s.proofStatus}">${s.proofStatus}</span></td>
+        <td>${s.anchorSig ? `<a target="_blank" href="https://explorer.solana.com/tx/${s.anchorSig}?cluster=devnet">${s.anchorSig.slice(0, 8)}…</a>` : "–"}</td></tr>`).join("") + "</table>"
+    : '<div class="empty">no finished fixtures yet</div>';
+
+  // gate blocks
+  const gates = st.gateBlocks || [];
+  el("gates-body").innerHTML = gates.length
+    ? `<table><tr><th>time</th><th>fixture</th><th>policy</th><th>reason</th></tr>` +
+      gates.map((g) => `<tr><td>${fmtT(g.ts)}</td><td>${g.fixtureId ?? ""}</td><td>${g.policy}</td>
+        <td style="text-align:left">${g.reason}</td></tr>`).join("") + "</table>"
+    : '<div class="empty">none</div>';
+}
+
+// ---- chart ----
+el("outsel").onchange = (e) => { S.outcome = e.target.value; scheduleDraw(); };
+let drawQueued = false;
+function scheduleDraw() {
+  if (drawQueued) return;
+  drawQueued = true;
+  requestAnimationFrame(() => { drawQueued = false; draw(); });
+}
+
+const canvas = el("chart");
+const tooltip = el("tooltip");
+let lastPoints = [];
+
+function draw() {
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width = canvas.clientWidth * devicePixelRatio;
+  const h = canvas.height = 260 * devicePixelRatio;
+  ctx.clearRect(0, 0, w, h);
+  const fixture = S.selectedFixture;
+  if (!fixture) return;
+  const pts = (S.series[seriesKey(fixture, S.outcome)] || []).filter((p) => p.consensus != null || p.model != null);
+  lastPoints = pts;
+  if (pts.length < 2) return;
+
+  const pad = 34 * devicePixelRatio;
+  const t0 = pts[0].t, t1 = pts[pts.length - 1].t || t0 + 1;
+  const x = (t) => pad + ((t - t0) / Math.max(1, t1 - t0)) * (w - pad * 1.4);
+  const y = (p) => h - pad + (pad * 0.4) - p * (h - pad * 1.6);
+
+  // recessive grid + axis labels
+  ctx.strokeStyle = "#242422"; ctx.fillStyle = "#8a897f";
+  ctx.lineWidth = 1; ctx.font = `${10 * devicePixelRatio}px ui-monospace`;
+  for (const gy of [0, 0.25, 0.5, 0.75, 1]) {
+    ctx.beginPath(); ctx.moveTo(pad, y(gy)); ctx.lineTo(w - pad * 0.4, y(gy)); ctx.stroke();
+    ctx.fillText((gy * 100).toFixed(0) + "%", 4 * devicePixelRatio, y(gy) + 3 * devicePixelRatio);
+  }
+
+  // bid/ask band
+  ctx.fillStyle = "rgba(144,133,233,0.13)";
+  ctx.beginPath();
+  let started = false;
+  for (const p of pts) { if (p.ask == null) continue; const px = x(p.t), py = y(p.ask); started ? ctx.lineTo(px, py) : ctx.moveTo(px, py); started = true; }
+  for (let i = pts.length - 1; i >= 0; i--) { const p = pts[i]; if (p.bid == null) continue; ctx.lineTo(x(p.t), y(p.bid)); }
+  if (started) { ctx.closePath(); ctx.fill(); }
+
+  const line = (get, color) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 2 * devicePixelRatio; ctx.beginPath();
+    let on = false;
+    for (const p of pts) {
+      const v = get(p); if (v == null) { on = false; continue; }
+      const px = x(p.t), py = y(v);
+      on ? ctx.lineTo(px, py) : ctx.moveTo(px, py); on = true;
+    }
+    ctx.stroke();
+  };
+  line((p) => p.consensus, getComputedStyle(document.documentElement).getPropertyValue("--series-consensus"));
+  line((p) => p.model, getComputedStyle(document.documentElement).getPropertyValue("--series-model"));
+}
+
+canvas.addEventListener("mousemove", (e) => {
+  if (!lastPoints.length) return;
+  const rect = canvas.getBoundingClientRect();
+  const frac = (e.clientX - rect.left) / rect.width;
+  const t0 = lastPoints[0].t, t1 = lastPoints[lastPoints.length - 1].t;
+  const target = t0 + frac * (t1 - t0);
+  let best = lastPoints[0];
+  for (const p of lastPoints) if (Math.abs(p.t - target) < Math.abs(best.t - target)) best = p;
+  tooltip.style.display = "block";
+  tooltip.style.left = e.clientX + 12 + "px";
+  tooltip.style.top = e.clientY + 12 + "px";
+  tooltip.innerHTML = `${fmtT(best.t)}<br>model ${fmtP(best.model)} · cons ${fmtP(best.consensus)}<br>bid ${fmtP(best.bid)} · ask ${fmtP(best.ask)}`;
+});
+canvas.addEventListener("mouseleave", () => tooltip.style.display = "none");
+window.addEventListener("resize", scheduleDraw);
+</script>
+</body>
+</html>
