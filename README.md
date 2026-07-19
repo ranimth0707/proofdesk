@@ -158,7 +158,7 @@ What worked well and what we hit — see [docs/TXLINE-FEEDBACK.md](docs/TXLINE-F
 
 ## Demo video
 
-[video/proofdesk-demo.mp4](video/proofdesk-demo.mp4) (2:48) — narrated walkthrough: the problem, the model-vs-consensus edge, the risk gate, a real devnet anchor transaction verified against the ledger, the 24/7 VPS deployment, and the test suite. Recorded against a deterministic replay session (`scripts/make-sample-session.ts`) with real on-chain anchoring — the anchor transaction shown is genuine and independently verifiable with `npm run verify-anchors`. Narration script at [docs/DEMO-SCRIPT.md](docs/DEMO-SCRIPT.md).
+[video/proofdesk-demo.mp4](video/proofdesk-demo.mp4) (3:41) — narrated walkthrough built as a motion-graphics production (Remotion): the problem, the two TxLINE feeds, the model-vs-consensus edge (a real animated chart, not a static screenshot), the decision engine, the fail-closed risk gate, on-chain anchoring, a real devnet transaction verified against the ledger, proof-based settlement, the 24/7 VPS deployment, and the test suite. Built on a deterministic replay session (`scripts/make-sample-session.ts`) with real on-chain anchoring — the anchor transaction shown is genuine and independently verifiable with `npm run verify-anchors`. Narration script at [docs/DEMO-SCRIPT.md](docs/DEMO-SCRIPT.md).
 
 ## License
 
