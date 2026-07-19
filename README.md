@@ -1,5 +1,8 @@
 # ProofDesk
 
+**Live dashboard (deployed, runs 24/7): https://stomach-eight-yacht-whether.trycloudflare.com**
+*(Cloudflare Quick Tunnel — no uptime SLA; if it's briefly unreachable, `npm run replay` below reproduces the identical session locally in under a minute.)*
+
 **An autonomous in-play market maker whose every quote and every settlement is cryptographically verifiable.**
 
 ProofDesk consumes both TxLINE World Cup feeds — the scout-sourced **scores stream** and the **StablePrice odds consensus** — prices the full-time 1X2 market with its own deterministic in-play model, quotes a two-sided book, simulates fills against informed flow, and settles every position against **TxLINE's on-chain Merkle roots** via `validateStatV2`. Every quote batch is hashed and anchored to Solana **before outcomes are known**, so the desk's track record cannot be retro-fitted — not even by us.
