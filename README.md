@@ -1,7 +1,7 @@
 # ProofDesk
 
-**Live dashboard (deployed, runs 24/7): https://stomach-eight-yacht-whether.trycloudflare.com**
-*(Cloudflare Quick Tunnel — no uptime SLA; if it's briefly unreachable, `npm run replay` below reproduces the identical session locally in under a minute.)*
+**Live dashboard (deployed, runs 24/7): http://43.133.142.55:8787**
+*(If it's ever briefly unreachable, `npm run replay` below reproduces the identical session locally in under a minute.)*
 
 **An autonomous in-play market maker whose every quote and every settlement is cryptographically verifiable.**
 
